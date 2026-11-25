@@ -87,7 +87,7 @@ async function loadQuotaState() {
   }
 }
 function saveQuotaState() {
-  quotaWriteQueue = quotaWriteQueue.then(async () => {
+  quotaWriteQueue = quotaWriteQueue.catch(() => {}).then(async () => {
     await fs.mkdir(DATA_DIR, { recursive: true });
     const tempFile = QUOTA_FILE + "." + process.pid + ".tmp";
     await fs.writeFile(tempFile, JSON.stringify(quotaState, null, 2), "utf8");
