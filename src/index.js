@@ -580,4 +580,41 @@ client.on(Events.InteractionCreate, async interaction => {
   }
 });
 
+client.on(Events.MessageCreate, async message => {
+  try {
+    if (message.author.bot || !message.inGuild() || !message.content.startsWith("!")) return;
+    const args = message.content.trim().slice(1).split(/\\s+/);
+    const command = (args.shift() || "").toLowerCase();
+    const admin = isAdminUser(message.author.id, message.member && message.member.permissions);
+    if (command === "credits") {
+      const targetMention = message.mentions.users.first();
+      const targetId = args.find(value => /^\\d{15,22}$/.test(value));
+      if ((targetMention || targetId) && !admin) { await message.reply("Only admins can check another user's credits."); return; }
+      const target = targetMention || (targetId ? await client.users.fetch(targetId).catch(() => null) : null) || message.author;
+      const balance = await getQuotaSummary(target.id);
+      const targetIsAdmin = target.id === message.author.id ? admin : isAdminUser(target.id);
+      await message.reply(`**${target.tag} — StarVeil credits**\\nDaily uses remaining: **${balance.remaining}/5**\\nExtra credits: **${balance.credits}**${targetIsAdmin ? "\\nAdmin: **Unlimited obfuscations**" : ""}`);
+      return;
+    }
+    if (command === "addcredits") {
+      if (!admin) { await message.reply("You need Administrator permission to use `!addcredits`."); return; }
+      const targetMention = message.mentions.users.first();
+      const targetId = args.find(value => /^\\d{15,22}$/.test(value));
+      const target = targetMention || (targetId ? await client.users.fetch(targetId).catch(() => null) : null);
+      const amountText = args.find(value => /^\\d+$/.test(value) && value !== targetId);
+      const amount = Number(amountText);
+      if (!target || !Number.isSafeInteger(amount) || amount < 1 || amount > 1000000) {
+        await message.reply("Usage: `!addcredits @user amount` (amount must be 1–1,000,000).");
+        return;
+      }
+      await quotaReady;
+      quotaState.credits[target.id] = Math.max(0, Number(quotaState.credits[target.id]) || 0) + amount;
+      await saveQuotaState();
+      await message.reply(`Added **${amount}** StarVeil obfuscation credit(s) to **${target.tag}**. New balance: **${quotaState.credits[target.id]}**.`);
+    }
+  } catch (error) {
+    console.error("Prefix command error:", error);
+    await message.reply("The command failed. Please try again.").catch(() => {});
+  }
+});
 client.login(process.env.DISCORD_TOKEN);
