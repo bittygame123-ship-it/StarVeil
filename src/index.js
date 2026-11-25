@@ -12,6 +12,8 @@ const {
   GatewayIntentBits,
   LabelBuilder,
   ModalBuilder,
+  StringSelectMenuBuilder,
+  PermissionFlagsBits,
 } = require("discord.js");
 const { execFile } = require("node:child_process");
 const { promisify } = require("node:util");
@@ -22,19 +24,25 @@ const { randomUUID } = require("node:crypto");
 const execFileAsync = promisify(execFile);
 const ROOT = path.resolve(__dirname, "..");
 const TEMP_DIR = path.join(ROOT, "temp");
+const DATA_DIR = path.join(ROOT, "data");
+const QUOTA_FILE = path.join(DATA_DIR, "quota.json");
 const LUA_BIN = path.join(ROOT, "bin", "lua");
 const PROMETHEUS_CLI = path.join(ROOT, "Prometheus", "cli.lua");
 const MAX_FILE_SIZE = 2 * 1024 * 1024;
 const SESSION_TTL = 20 * 60 * 1000;
 const ALLOWED_EXTENSIONS = new Set([".lua", ".luau", ".txt"]);
-const OUTPUT_HEADER = "-- The File Was Protected By Project Eternal https://discord.com/invite/XTsS4jhEbJ";
+const OUTPUT_HEADER = "-- This File Was Protected By StarVeil https://discord.gg/2qzCyb5KUv";
 
 if (!process.env.DISCORD_TOKEN) {
   throw new Error("DISCORD_TOKEN is missing. Add it to your .env file or Wispbyte environment variables.");
 }
 
-const client = new Client({ intents: [GatewayIntentBits.Guilds] });
+const client = new Client({ intents: [GatewayIntentBits.Guilds, GatewayIntentBits.GuildMessages, GatewayIntentBits.MessageContent] });
 const sessions = new Map();
+const pendingReservations = new Map();
+let quotaState = { daily: {}, credits: {} };
+let quotaReady;
+let quotaWriteQueue = Promise.resolve();
 
 const STEP_OPTIONS = [
   { label: "Encrypt Strings", value: "EncryptStrings", description: "Encrypt string literals and add runtime decoding." },
@@ -66,6 +74,79 @@ const NAME_GENERATORS = [
   { label: "Number", value: "Number" }
 ];
 
+function utcDayKey() { return new Date().toISOString().slice(0, 10); }
+async function loadQuotaState() {
+  await fs.mkdir(DATA_DIR, { recursive: true });
+  try {
+    const parsed = JSON.parse(await fs.readFile(QUOTA_FILE, "utf8"));
+    quotaState = { daily: parsed && parsed.daily && typeof parsed.daily === "object" ? parsed.daily : {}, credits: parsed && parsed.credits && typeof parsed.credits === "object" ? parsed.credits : {} };
+  } catch (error) {
+    if (error.code !== "ENOENT") console.error("Could not read quota store:", error);
+    quotaState = { daily: {}, credits: {} };
+    await saveQuotaState();
+  }
+}
+function saveQuotaState() {
+  quotaWriteQueue = quotaWriteQueue.then(async () => {
+    await fs.mkdir(DATA_DIR, { recursive: true });
+    const tempFile = QUOTA_FILE + "." + process.pid + ".tmp";
+    await fs.writeFile(tempFile, JSON.stringify(quotaState, null, 2), "utf8");
+    await fs.rename(tempFile, QUOTA_FILE);
+  });
+  return quotaWriteQueue;
+}
+function isAdminUser(userId, permissions) {
+  const configured = (process.env.ADMIN_IDS || "").split(",").map(value => value.trim()).filter(Boolean);
+  return configured.includes(userId) || Boolean(permissions && permissions.has && permissions.has(PermissionFlagsBits.Administrator));
+}
+function getPendingFor(userId) { return pendingReservations.get(userId) || []; }
+async function reserveObfuscation(userId, admin) {
+  await quotaReady;
+  if (admin) return { userId, type: "admin", finished: false };
+  const today = utcDayKey();
+  let record = quotaState.daily[userId];
+  if (!record || record.day !== today) record = { day: today, count: 0 };
+  quotaState.daily[userId] = record;
+  const pending = getPendingFor(userId);
+  const pendingDaily = pending.filter(item => item.type === "daily").length;
+  const pendingCredits = pending.filter(item => item.type === "credit").length;
+  let type;
+  if (record.count + pendingDaily < 5) type = "daily";
+  else {
+    const credits = Math.max(0, Number(quotaState.credits[userId]) || 0);
+    if (credits - pendingCredits < 1) return null;
+    type = "credit";
+  }
+  const reservation = { userId, type, finished: false };
+  pending.push(reservation);
+  pendingReservations.set(userId, pending);
+  return reservation;
+}
+async function finishReservation(reservation, success) {
+  if (!reservation || reservation.finished) return;
+  reservation.finished = true;
+  if (reservation.type === "admin") return;
+  const pending = getPendingFor(reservation.userId).filter(item => item !== reservation);
+  if (pending.length) pendingReservations.set(reservation.userId, pending); else pendingReservations.delete(reservation.userId);
+  if (!success) return;
+  if (reservation.type === "daily") {
+    const today = utcDayKey();
+    let record = quotaState.daily[reservation.userId];
+    if (!record || record.day !== today) record = { day: today, count: 0 };
+    record.count += 1;
+    quotaState.daily[reservation.userId] = record;
+  } else {
+    quotaState.credits[reservation.userId] = Math.max(0, Number(quotaState.credits[reservation.userId]) || 0) - 1;
+  }
+  await saveQuotaState();
+}
+async function getQuotaSummary(userId) {
+  await quotaReady;
+  const record = quotaState.daily[userId];
+  const used = record && record.day === utcDayKey() ? Math.max(0, Number(record.count) || 0) : 0;
+  const credits = Math.max(0, Number(quotaState.credits[userId]) || 0);
+  return { used, remaining: Math.max(0, 5 - used), credits };
+}
 function pruneSessions() {
   const now = Date.now();
   for (const [id, session] of sessions) {
@@ -88,29 +169,32 @@ function getOwnedSession(interaction, sessionId) {
 function panelEmbed() {
   return new EmbedBuilder()
     .setColor(0x202225)
-    .setTitle("PROJECT ETERNAL")
-    .setDescription("Upload a Lua/Luau script to protect it with Project Eternal.")
-    .setFooter({ text: "Project Eternal" });
+    .setTitle("STARVEIL")
+    .setDescription("Upload a Lua/Luau script to protect it with StarVeil.")
+    .setFooter({ text: "StarVeil • Based on Prometheus by Elias Oelschner, https://github.com/prometheus-lua/Prometheus" });
 }
 
 function privateNoticeEmbed() {
   return new EmbedBuilder()
     .setColor(0x5865f2)
-    .setTitle("PROJECT ETERNAL")
+    .setTitle("STARVEIL")
     .setDescription("Upload your script to unlock the controls.");
 }
 
 function providerComponents(sessionId) {
-  return [new ActionRowBuilder().addComponents(
-    new ButtonBuilder()
-      .setCustomId(`pe:provider:${sessionId}`)
-      .setLabel("Eternal Engine")
-      .setStyle(ButtonStyle.Primary),
-    new ButtonBuilder()
-      .setCustomId(`pe:cancel:${sessionId}`)
-      .setLabel("Cancel")
-      .setStyle(ButtonStyle.Secondary)
-  )];
+  return [
+    new ActionRowBuilder().addComponents(
+      new StringSelectMenuBuilder()
+        .setCustomId(`pe:provider:${sessionId}`)
+        .setPlaceholder("Choose an obfuscator")
+        .setMinValues(1)
+        .setMaxValues(1)
+        .addOptions({ label: "StarVeil 1.0", value: "prometheus", description: "StarVeil protection powered by Prometheus" })
+    ),
+    new ActionRowBuilder().addComponents(
+      new ButtonBuilder().setCustomId(`pe:cancel:${sessionId}`).setLabel("Cancel").setStyle(ButtonStyle.Secondary)
+    )
+  ];
 }
 
 function settingsEmbed(session) {
@@ -124,8 +208,11 @@ function settingsEmbed(session) {
       `**Steps:** ${stepCount}/${STEP_OPTIONS.length}`,
       `**Constants:** ${session.constantOptions.length}/3`,
       `**Names:** ${session.nameGenerator}`,
-      `**Target:** ${session.luaVersion}`
-    ].join("\n"));
+      `**Target:** ${session.luaVersion}`,
+      session.steps.includes("SplitStrings") && session.steps.includes("ProxifyLocals") && session.steps.includes("AddVararg")
+        ? "⚡ **Ultra preset:** this combination can take a few minutes."
+        : ""
+    ].filter(Boolean).join("\n"));
 }
 
 function settingsComponents(session) {
@@ -136,7 +223,7 @@ function settingsComponents(session) {
         new ButtonBuilder()
           .setCustomId(`pe:step:${session.id}:${option.value}`)
           .setLabel(`${session.steps.includes(option.value) ? "✓ " : ""}${option.label}`)
-          .setStyle(session.steps.includes(option.value) ? ButtonStyle.Success : ButtonStyle.Secondary)
+          .setStyle(session.steps.includes(option.value) ? ButtonStyle.Primary : ButtonStyle.Secondary)
       )
     ));
   }
@@ -146,7 +233,7 @@ function settingsComponents(session) {
       new ButtonBuilder()
         .setCustomId(`pe:constant:${session.id}:${option.value}`)
         .setLabel(`${session.constantOptions.includes(option.value) ? "✓ " : ""}${option.label}`)
-        .setStyle(session.constantOptions.includes(option.value) ? ButtonStyle.Success : ButtonStyle.Secondary)
+        .setStyle(session.constantOptions.includes(option.value) ? ButtonStyle.Primary : ButtonStyle.Secondary)
     )
   ));
 
@@ -274,71 +361,45 @@ async function downloadAttachment(attachment, destination) {
 async function runObfuscation(interaction, session, attachment) {
   const originalName = attachment.name || "script.lua";
   const extension = path.extname(originalName).toLowerCase();
-  if (!ALLOWED_EXTENSIONS.has(extension)) {
+  if (!ALLOWED_EXTENSIONS.has(extension)) { sessions.delete(session.id); await interaction.editReply({ content: "Please upload a `.lua`, `.luau`, or `.txt` file." }); return; }
+  if (attachment.size > MAX_FILE_SIZE) { sessions.delete(session.id); await interaction.editReply({ content: "That file is larger than the 2 MB limit." }); return; }
+  const admin = isAdminUser(interaction.user.id, interaction.memberPermissions);
+  const reservation = await reserveObfuscation(interaction.user.id, admin);
+  if (!reservation) {
     sessions.delete(session.id);
-    await interaction.editReply({ content: "Please upload a `.lua`, `.luau`, or `.txt` file." });
+    await interaction.editReply({ content: "You've used your 5 free obfuscations for today and have no credits left. Use `!credits` to check your balance. Your daily allowance resets at 00:00 UTC." });
     return;
   }
-  if (attachment.size > MAX_FILE_SIZE) {
-    sessions.delete(session.id);
-    await interaction.editReply({ content: "That file is larger than the 2 MB limit." });
-    return;
-  }
-
-  await fs.mkdir(TEMP_DIR, { recursive: true });
   const id = randomUUID();
   const inputPath = path.join(TEMP_DIR, `${id}${extension}`);
   const outputPath = path.join(TEMP_DIR, `${id}.prometheus.lua`);
   const configPath = path.join(TEMP_DIR, `${id}.config.lua`);
-
   try {
+    await fs.mkdir(TEMP_DIR, { recursive: true });
     await downloadAttachment(attachment, inputPath);
     await fs.writeFile(configPath, buildPrometheusConfig(session), { flag: "wx" });
-
-    await execFileAsync(
-      LUA_BIN,
-      [PROMETHEUS_CLI, "--config", configPath, inputPath, "--out", outputPath],
-      {
-        cwd: ROOT,
-        timeout: 30_000,
-        maxBuffer: 4 * 1024 * 1024,
-        windowsHide: true
-      }
-    );
-
+    await execFileAsync(LUA_BIN, [PROMETHEUS_CLI, "--config", configPath, inputPath, "--out", outputPath], { cwd: ROOT, maxBuffer: 16 * 1024 * 1024, windowsHide: true });
     const outputStats = await fs.stat(outputPath).catch(() => null);
-    if (!outputStats || !outputStats.isFile() || outputStats.size === 0) {
-      throw new Error("Prometheus did not produce an output file.");
-    }
-
+    if (!outputStats || !outputStats.isFile() || outputStats.size === 0) throw new Error("Prometheus did not produce an output file.");
     const obfuscated = await fs.readFile(outputPath, "utf8");
     await fs.writeFile(outputPath, `${OUTPUT_HEADER}\n${obfuscated}`, "utf8");
-
-    const baseName = path.basename(originalName, extension)
-      .replace(/[^a-zA-Z0-9_-]/g, "_")
-      .slice(0, 80) || "script";
+    const baseName = path.basename(originalName, extension).replace(/[^a-zA-Z0-9_-]/g, "_").slice(0, 80) || "script";
     const outputName = `${baseName} obf.lua`;
     const result = new AttachmentBuilder(outputPath, { name: outputName });
-
-    await interaction.editReply({
-      content: `**Protection complete.**\nOutput: **${outputName}**`,
-      files: [result]
-    });
+    const payload = { content: `**StarVeil protection complete.**\nOutput: **${outputName}**`, files: [result] };
+    try { await interaction.editReply(payload); } catch (replyError) { await interaction.user.send(payload); }
+    await finishReservation(reservation, true);
   } catch (error) {
     console.error("Obfuscation failed:", error);
-    const message = error.killed
-      ? "Protection timed out after 30 seconds. Try fewer transformations or a smaller script."
-      : "Obfuscation failed. Check that the script is valid for the selected Lua target and try a different combination of transformations.";
-    await interaction.editReply({ content: message }).catch(() => {});
+    const message = "Obfuscation failed. No daily use or credit was consumed. Check that the script is valid for the selected Lua target and try a different combination of transformations.";
+    await interaction.editReply({ content: message }).catch(async () => { await interaction.user.send(message).catch(() => {}); });
+    await finishReservation(reservation, false);
   } finally {
-    await Promise.all([
-      fs.rm(inputPath, { force: true }).catch(() => {}),
-      fs.rm(outputPath, { force: true }).catch(() => {}),
-      fs.rm(configPath, { force: true }).catch(() => {})
-    ]);
+    await Promise.all([fs.rm(inputPath, { force: true }).catch(() => {}), fs.rm(outputPath, { force: true }).catch(() => {}), fs.rm(configPath, { force: true }).catch(() => {})]);
     sessions.delete(session.id);
   }
 }
+quotaReady = loadQuotaState();
 
 client.once(Events.ClientReady, readyClient => {
   console.log(`Logged in as ${readyClient.user.tag}`);
@@ -361,7 +422,7 @@ client.on(Events.InteractionCreate, async interaction => {
             .setEmoji("🛡️")
         )]
       });
-      await interaction.reply({ content: "Project Eternal's obfuscator panel has been posted.", ephemeral: true });
+      await interaction.reply({ content: "StarVeil's obfuscator panel has been posted.", ephemeral: true });
       return;
     }
 
@@ -387,13 +448,14 @@ client.on(Events.InteractionCreate, async interaction => {
       return;
     }
 
-    if (interaction.isButton() && interaction.customId.startsWith("pe:provider:")) {
+    if (interaction.isStringSelectMenu() && interaction.customId.startsWith("pe:provider:")) {
       const id = interaction.customId.split(":")[2];
       const session = getOwnedSession(interaction, id);
       if (!session) return interaction.reply({ content: "This session expired. Press the panel button again.", ephemeral: true });
+      if (!interaction.values.includes("prometheus")) return interaction.reply({ content: "That obfuscator is not available yet.", ephemeral: true });
       session.provider = "prometheus";
       await interaction.update({
-        embeds: [privateNoticeEmbed().setDescription("Eternal Engine selected. Upload your script to continue.")],
+        embeds: [privateNoticeEmbed().setDescription("StarVeil 1.0 selected. Upload your script to continue.")],
         components: [new ActionRowBuilder().addComponents(
           new ButtonBuilder()
             .setCustomId(`pe:upload:${id}`)
