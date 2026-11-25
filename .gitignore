@@ -5,3 +5,5 @@ temp/*
 bin/*
 !bin/.gitkeep
 Prometheus/
+data/*
+!data/.gitkeep

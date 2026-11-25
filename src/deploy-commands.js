@@ -10,7 +10,7 @@ if (!DISCORD_TOKEN || !CLIENT_ID) {
 const commands = [
   new SlashCommandBuilder()
     .setName("panel")
-    .setDescription("Post the Project Eternal private obfuscator panel")
+    .setDescription("Post the StarVeil private obfuscator panel")
     .toJSON()
 ];
 
