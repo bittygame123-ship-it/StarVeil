@@ -1,0 +1,19 @@
+{
+  "name": "project-eternal-obfuscator",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Project Eternal Discord bot for protecting Lua/Luau files",
+  "main": "src/index.js",
+  "scripts": {
+    "start": "node src/index.js",
+    "deploy": "node src/deploy-commands.js",
+    "setup": "bash setup.sh"
+  },
+  "engines": {
+    "node": ">=18.17.0"
+  },
+  "dependencies": {
+    "discord.js": "^14.25.1",
+    "dotenv": "^16.6.1"
+  }
+}

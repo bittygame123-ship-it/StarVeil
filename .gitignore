@@ -1,0 +1,7 @@
+.env
+node_modules/
+temp/*
+!temp/.gitkeep
+bin/*
+!bin/.gitkeep
+Prometheus/
