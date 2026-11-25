@@ -274,11 +274,11 @@ function buildPrometheusConfig(session) {
   if (selected.has("SplitStrings")) {
     steps.push('{ Name = "SplitStrings", Settings = { Threshold = 1, MinLength = 5, MaxLength = 5, ConcatenationType = "custom", CustomFunctionType = "global", CustomLocalFunctionsCount = 2 } }');
   }
-  if (selected.has("AddVararg")) {
-    steps.push('{ Name = "AddVararg", Settings = {} }');
-  }
   if (selected.has("ProxifyLocals")) {
     steps.push('{ Name = "ProxifyLocals", Settings = { LiteralType = "string" } }');
+  }
+  if (selected.has("AddVararg")) {
+    steps.push('{ Name = "AddVararg", Settings = {} }');
   }
   if (selected.has("Vmify")) {
     steps.push('{ Name = "Vmify", Settings = {} }');
@@ -583,23 +583,23 @@ client.on(Events.InteractionCreate, async interaction => {
 client.on(Events.MessageCreate, async message => {
   try {
     if (message.author.bot || !message.inGuild() || !message.content.startsWith("!")) return;
-    const args = message.content.trim().slice(1).split(/\\s+/);
+    const args = message.content.trim().slice(1).split(/\s+/);
     const command = (args.shift() || "").toLowerCase();
     const admin = isAdminUser(message.author.id, message.member && message.member.permissions);
     if (command === "credits") {
       const targetMention = message.mentions.users.first();
-      const targetId = args.find(value => /^\\d{15,22}$/.test(value));
+      const targetId = args.find(value => /^\d{15,22}$/.test(value));
       if ((targetMention || targetId) && !admin) { await message.reply("Only admins can check another user's credits."); return; }
       const target = targetMention || (targetId ? await client.users.fetch(targetId).catch(() => null) : null) || message.author;
       const balance = await getQuotaSummary(target.id);
       const targetIsAdmin = target.id === message.author.id ? admin : isAdminUser(target.id);
-      await message.reply(`**${target.tag} — StarVeil credits**\\nDaily uses remaining: **${balance.remaining}/5**\\nExtra credits: **${balance.credits}**${targetIsAdmin ? "\\nAdmin: **Unlimited obfuscations**" : ""}`);
+      await message.reply(`**${target.tag} — StarVeil credits**\nDaily uses remaining: **${balance.remaining}/5**\nExtra credits: **${balance.credits}**${targetIsAdmin ? "\nAdmin: **Unlimited obfuscations**" : ""}`);
       return;
     }
     if (command === "addcredits") {
       if (!admin) { await message.reply("You need Administrator permission to use `!addcredits`."); return; }
       const targetMention = message.mentions.users.first();
-      const targetId = args.find(value => /^\\d{15,22}$/.test(value));
+      const targetId = args.find(value => /^\d{15,22}$/.test(value));
       const target = targetMention || (targetId ? await client.users.fetch(targetId).catch(() => null) : null);
       const amountText = args.find(value => /^\\d+$/.test(value) && value !== targetId);
       const amount = Number(amountText);
