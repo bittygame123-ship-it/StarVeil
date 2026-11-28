@@ -344,6 +344,8 @@ client.on(Events.InteractionCreate, async interaction => {
       if (!session) return interaction.reply({ content: "This session expired. Press the panel button again.", ephemeral: true });
       if (!OPTION_DEFINITIONS.some(option => option.key === optionKey)) return interaction.reply({ content: "That setting is unavailable.", ephemeral: true });
       session.options[optionKey] = !session.options[optionKey];
+      if (optionKey === "vm" && !session.options.vm) session.options.max = false;
+      if (optionKey === "max" && session.options.max) session.options.vm = true;
       await interaction.update({ embeds: [settingsEmbed(session)], components: settingsComponents(session) });
       return;
     }
