@@ -2,7 +2,7 @@
   "name": "starveil-discord-obfuscator",
   "version": "1.1.0",
   "private": true,
-  "description": "StarVeil Discord bot for private Lua/Luau obfuscation using Prometheus",
+  "description": "StarVeil Discord bot for private Luau obfuscation",
   "main": "src/index.js",
   "scripts": {
     "start": "node src/index.js",

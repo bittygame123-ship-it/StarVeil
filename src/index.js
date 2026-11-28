@@ -26,8 +26,7 @@ const ROOT = path.resolve(__dirname, "..");
 const TEMP_DIR = path.join(ROOT, "temp");
 const DATA_DIR = path.join(ROOT, "data");
 const QUOTA_FILE = path.join(DATA_DIR, "quota.json");
-const LUA_BIN = path.join(ROOT, "bin", "lua");
-const PROMETHEUS_CLI = path.join(ROOT, "Prometheus", "cli.lua");
+const CLYDE_CLI = path.join(ROOT, "Clyde", "dist", "cli", "obfuscate.js");
 const MAX_FILE_SIZE = 2 * 1024 * 1024;
 const SESSION_TTL = 20 * 60 * 1000;
 const ALLOWED_EXTENSIONS = new Set([".lua", ".luau", ".txt"]);
@@ -44,34 +43,12 @@ let quotaState = { daily: {}, credits: {} };
 let quotaReady;
 let quotaWriteQueue = Promise.resolve();
 
-const STEP_OPTIONS = [
-  { label: "Encrypt Strings", value: "EncryptStrings", description: "Encrypt string literals and add runtime decoding." },
-  { label: "Constant Array", value: "ConstantArray", description: "Move constants into a transformed lookup array." },
-  { label: "Numbers To Expressions", value: "NumbersToExpressions", description: "Rewrite numeric literals as expressions." },
-  { label: "Anti-Tamper", value: "AntiTamper", description: "Add integrity and anti-hook checks." },
-  { label: "Control Flow Flattening", value: "Cff", description: "Flatten control flow into dispatcher blocks." },
-  { label: "Virtual Machine (VMify)", value: "Vmify", description: "Compile code into Prometheus's register VM." },
-  { label: "Wrap In Function", value: "WrapInFunction", description: "Wrap the script body in a function call." },
-  { label: "Split Strings", value: "SplitStrings", description: "Split string literals and rebuild them at runtime." },
-  { label: "Proxify Locals", value: "ProxifyLocals", description: "Route local variable accesses through proxies." },
-  { label: "Add Vararg", value: "AddVararg", description: "Append varargs to eligible function signatures." }
-];
-
-const DEFAULT_STEPS = [
-  "Vmify", "EncryptStrings", "AntiTamper", "ConstantArray",
-  "WrapInFunction", "Cff", "NumbersToExpressions"
-];
-const CONSTANT_OPTIONS = [
-  { label: "Strings Only", value: "stringsOnly", description: "Only move string constants into the array." },
-  { label: "Shuffle Constants", value: "shuffle", description: "Shuffle constant-array positions." },
-  { label: "Rotate Constants", value: "rotate", description: "Rotate the array at runtime." }
-];
-const NAME_GENERATORS = [
-  { label: "Mangled Shuffled (recommended)", value: "MangledShuffled" },
-  { label: "Mangled", value: "Mangled" },
-  { label: "Confuse", value: "Confuse" },
-  { label: "Il", value: "Il" },
-  { label: "Number", value: "Number" }
+const OPTION_DEFINITIONS = [
+  { key: "renameLocals", label: "Rename Locals" },
+  { key: "encodeStrings", label: "Encode Strings" },
+  { key: "scramble", label: "Scramble Control Flow" },
+  { key: "vm", label: "Virtual Machine" },
+  { key: "max", label: "Maximum VM Protection" }
 ];
 
 function utcDayKey() { return new Date().toISOString().slice(0, 10); }
@@ -167,160 +144,41 @@ function getOwnedSession(interaction, sessionId) {
 }
 
 function panelEmbed() {
-  return new EmbedBuilder()
-    .setColor(0x202225)
-    .setTitle("STARVEIL")
-    .setDescription("Upload a Lua/Luau script to protect it with StarVeil.")
-    .setFooter({ text: "StarVeil • Based on Prometheus by Elias Oelschner, https://github.com/prometheus-lua/Prometheus" });
+  return new EmbedBuilder().setColor(0x202225).setTitle("STARVEIL")
+    .setDescription("Upload a Luau script to protect it with StarVeil.")
+    .setFooter({ text: "StarVeil • Luau Protection" });
 }
-
 function privateNoticeEmbed() {
-  return new EmbedBuilder()
-    .setColor(0x5865f2)
-    .setTitle("STARVEIL")
+  return new EmbedBuilder().setColor(0x5865f2).setTitle("STARVEIL")
     .setDescription("Upload your script to unlock the controls.");
 }
-
 function providerComponents(sessionId) {
   return [
     new ActionRowBuilder().addComponents(
-      new StringSelectMenuBuilder()
-        .setCustomId(`pe:provider:${sessionId}`)
-        .setPlaceholder("Choose an obfuscator")
-        .setMinValues(1)
-        .setMaxValues(1)
-        .addOptions({ label: "StarVeil 1.0", value: "prometheus", description: "StarVeil protection powered by Prometheus" })
+      new StringSelectMenuBuilder().setCustomId(`pe:provider:${sessionId}`)
+        .setPlaceholder("Choose an obfuscator").setMinValues(1).setMaxValues(1)
+        .addOptions({ label: "StarVeil 1.0", value: "starveil", description: "Luau protection engine" })
     ),
-    new ActionRowBuilder().addComponents(
-      new ButtonBuilder().setCustomId(`pe:cancel:${sessionId}`).setLabel("Cancel").setStyle(ButtonStyle.Secondary)
-    )
+    new ActionRowBuilder().addComponents(new ButtonBuilder().setCustomId(`pe:cancel:${sessionId}`).setLabel("Cancel").setStyle(ButtonStyle.Secondary))
   ];
 }
-
 function settingsEmbed(session) {
-  const stepCount = session.steps.length;
   const fileName = session.attachment?.name || "No file";
-  return new EmbedBuilder()
-    .setColor(0x5865f2)
-    .setTitle("OBFUSCATOR SETTINGS")
-    .setDescription([
-      `**File:** ${fileName}`,
-      `**Steps:** ${stepCount}/${STEP_OPTIONS.length}`,
-      `**Constants:** ${session.constantOptions.length}/3`,
-      `**Names:** ${session.nameGenerator}`,
-      `**Target:** ${session.luaVersion}`,
-      session.steps.includes("SplitStrings") && session.steps.includes("ProxifyLocals") && session.steps.includes("AddVararg")
-        ? "⚡ **Ultra preset:** this combination can take a few minutes."
-        : ""
-    ].filter(Boolean).join("\n"));
+  const enabled = OPTION_DEFINITIONS.filter(option => session.options[option.key]).map(option => option.label);
+  return new EmbedBuilder().setColor(0x5865f2).setTitle("STARVEIL 1.0 SETTINGS")
+    .setDescription([`**File:** ${fileName}`, "**Engine:** StarVeil 1.0",
+      `**Enabled:** ${enabled.join(", ") || "Basic obfuscation"}`, "**Target:** Luau"].join("\\n"));
 }
-
 function settingsComponents(session) {
-  const rows = [];
-  for (let i = 0; i < STEP_OPTIONS.length; i += 5) {
-    rows.push(new ActionRowBuilder().addComponents(
-      STEP_OPTIONS.slice(i, i + 5).map(option =>
-        new ButtonBuilder()
-          .setCustomId(`pe:step:${session.id}:${option.value}`)
-          .setLabel(`${session.steps.includes(option.value) ? "✓ " : ""}${option.label}`)
-          .setStyle(session.steps.includes(option.value) ? ButtonStyle.Primary : ButtonStyle.Secondary)
-      )
-    ));
-  }
-
-  rows.push(new ActionRowBuilder().addComponents(
-    ...CONSTANT_OPTIONS.map(option =>
-      new ButtonBuilder()
-        .setCustomId(`pe:constant:${session.id}:${option.value}`)
-        .setLabel(`${session.constantOptions.includes(option.value) ? "✓ " : ""}${option.label}`)
-        .setStyle(session.constantOptions.includes(option.value) ? ButtonStyle.Primary : ButtonStyle.Secondary)
-    )
-  ));
-
-  rows.push(new ActionRowBuilder().addComponents(
-    new ButtonBuilder()
-      .setCustomId(`pe:name:${session.id}`)
-      .setLabel(`Names: ${session.nameGenerator}`)
-      .setStyle(ButtonStyle.Secondary),
-    new ButtonBuilder()
-      .setCustomId(`pe:lua:${session.id}`)
-      .setLabel(`Target: ${session.luaVersion}`)
-      .setStyle(ButtonStyle.Secondary)
-  ));
-
-  rows.push(new ActionRowBuilder().addComponents(
-    new ButtonBuilder()
-      .setCustomId(`pe:start:${session.id}`)
-      .setLabel("START OBFUSCATION")
-      .setStyle(ButtonStyle.Success),
-    new ButtonBuilder()
-      .setCustomId(`pe:cancel:${session.id}`)
-      .setLabel("Cancel")
-      .setStyle(ButtonStyle.Danger)
-  ));
-  return rows;
-}
-
-function luaString(value) {
-  return `"${String(value).replace(/\\/g, "\\\\").replace(/"/g, '\\"')}"`;
-}
-
-function buildPrometheusConfig(session) {
-  const steps = [];
-  const selected = new Set(session.steps);
-
-  // Keep the sequence aligned with Prometheus's current Medium pipeline where possible.
-  // Optional AST transforms that should run before VM compilation are placed first.
-  if (selected.has("SplitStrings")) {
-    steps.push('{ Name = "SplitStrings", Settings = { Threshold = 1, MinLength = 5, MaxLength = 5, ConcatenationType = "custom", CustomFunctionType = "global", CustomLocalFunctionsCount = 2 } }');
-  }
-  if (selected.has("ProxifyLocals")) {
-    steps.push('{ Name = "ProxifyLocals", Settings = { LiteralType = "string" } }');
-  }
-  if (selected.has("AddVararg")) {
-    steps.push('{ Name = "AddVararg", Settings = {} }');
-  }
-  if (selected.has("Vmify")) {
-    steps.push('{ Name = "Vmify", Settings = {} }');
-  }
-  if (selected.has("EncryptStrings")) {
-    steps.push(`{ Name = "EncryptStrings", Settings = { HoistVmStrings = ${selected.has("Vmify") ? "true" : "false"} } }`);
-  }
-  if (selected.has("AntiTamper")) {
-    steps.push('{ Name = "AntiTamper", Settings = { UseDebug = false } }');
-  }
-  if (selected.has("ConstantArray")) {
-    const constantSettings = [
-      "Threshold = 1",
-      `StringsOnly = ${session.constantOptions.includes("stringsOnly") ? "true" : "false"}`,
-      `Shuffle = ${session.constantOptions.includes("shuffle") ? "true" : "false"}`,
-      `Rotate = ${session.constantOptions.includes("rotate") ? "true" : "false"}`,
-      "LocalWrapperThreshold = 0"
-    ].join(", ");
-    steps.push(`{ Name = "ConstantArray", Settings = { ${constantSettings} } }`);
-  }
-  if (selected.has("WrapInFunction")) {
-    steps.push('{ Name = "WrapInFunction", Settings = { Iterations = 1 } }');
-  }
-  if (selected.has("Cff")) {
-    steps.push(`{ Name = "Cff", Settings = { ExcludeVm = ${selected.has("Vmify") ? "true" : "false"} } }`);
-  }
-  if (selected.has("NumbersToExpressions")) {
-    steps.push('{ Name = "NumbersToExpressions", Settings = { Threshold = 1, InternalThreshold = 0.2 } }');
-  }
-
   return [
-    "return {",
-    `  LuaVersion = ${luaString(session.luaVersion)},`,
-    '  VarNamePrefix = "",',
-    `  NameGenerator = ${luaString(session.nameGenerator)},`,
-    "  PrettyPrint = false,",
-    "  Seed = 0,",
-    "  Steps = {",
-    steps.map(step => `    ${step},`).join("\n"),
-    "  }",
-    "}"
-  ].join("\n") + "\n";
+    new ActionRowBuilder().addComponents(OPTION_DEFINITIONS.map(option =>
+      new ButtonBuilder().setCustomId(`pe:option:${session.id}:${option.key}`)
+        .setLabel(`${session.options[option.key] ? "✓ " : ""}${option.label}`)
+        .setStyle(session.options[option.key] ? ButtonStyle.Primary : ButtonStyle.Secondary))),
+    new ActionRowBuilder().addComponents(
+      new ButtonBuilder().setCustomId(`pe:start:${session.id}`).setLabel("START OBFUSCATION").setStyle(ButtonStyle.Success),
+      new ButtonBuilder().setCustomId(`pe:cancel:${session.id}`).setLabel("Cancel").setStyle(ButtonStyle.Danger))
+  ];
 }
 
 function uploadModal(sessionId) {
@@ -372,15 +230,19 @@ async function runObfuscation(interaction, session, attachment) {
   }
   const id = randomUUID();
   const inputPath = path.join(TEMP_DIR, `${id}${extension}`);
-  const outputPath = path.join(TEMP_DIR, `${id}.prometheus.lua`);
-  const configPath = path.join(TEMP_DIR, `${id}.config.lua`);
+  const outputPath = path.join(TEMP_DIR, `${id}.starveil.lua`);
   try {
     await fs.mkdir(TEMP_DIR, { recursive: true });
     await downloadAttachment(attachment, inputPath);
-    await fs.writeFile(configPath, buildPrometheusConfig(session), { flag: "wx" });
-    await execFileAsync(LUA_BIN, [PROMETHEUS_CLI, "--config", configPath, inputPath, "--out", outputPath], { cwd: ROOT, maxBuffer: 16 * 1024 * 1024, windowsHide: true });
+    const args = [inputPath, "--output", outputPath];
+    if (!session.options.renameLocals) args.push("--no-rename");
+    if (session.options.encodeStrings) args.push("--encode-strings");
+    if (session.options.scramble) args.push("--scramble");
+    if (session.options.vm) args.push("--vm");
+    if (session.options.vm && session.options.max) args.push("--max");
+    await execFileAsync(process.execPath, [CLYDE_CLI, ...args], { cwd: ROOT, maxBuffer: 32 * 1024 * 1024, windowsHide: true });
     const outputStats = await fs.stat(outputPath).catch(() => null);
-    if (!outputStats || !outputStats.isFile() || outputStats.size === 0) throw new Error("Prometheus did not produce an output file.");
+    if (!outputStats || !outputStats.isFile() || outputStats.size === 0) throw new Error("StarVeil 1.0 did not produce an output file.");
     const obfuscated = await fs.readFile(outputPath, "utf8");
     await fs.writeFile(outputPath, `${OUTPUT_HEADER}\n${obfuscated}`, "utf8");
     const baseName = path.basename(originalName, extension).replace(/[^a-zA-Z0-9_-]/g, "_").slice(0, 80) || "script";
@@ -391,11 +253,11 @@ async function runObfuscation(interaction, session, attachment) {
     await finishReservation(reservation, true);
   } catch (error) {
     console.error("Obfuscation failed:", error);
-    const message = "Obfuscation failed. No daily use or credit was consumed. Check that the script is valid for the selected Lua target and try a different combination of transformations.";
+    const message = "Obfuscation failed. No daily use or credit was consumed. Check that the script uses valid Luau syntax and try again.";
     await interaction.editReply({ content: message }).catch(async () => { await interaction.user.send(message).catch(() => {}); });
     await finishReservation(reservation, false);
   } finally {
-    await Promise.all([fs.rm(inputPath, { force: true }).catch(() => {}), fs.rm(outputPath, { force: true }).catch(() => {}), fs.rm(configPath, { force: true }).catch(() => {})]);
+    await Promise.all([fs.rm(inputPath, { force: true }).catch(() => {}), fs.rm(outputPath, { force: true }).catch(() => {})]);
     sessions.delete(session.id);
   }
 }
@@ -433,10 +295,7 @@ client.on(Events.InteractionCreate, async interaction => {
         id,
         userId: interaction.user.id,
         provider: null,
-        steps: [...DEFAULT_STEPS],
-        constantOptions: ["stringsOnly", "shuffle", "rotate"],
-        nameGenerator: "MangledShuffled",
-        luaVersion: "Lua51",
+        options: { renameLocals: true, encodeStrings: true, scramble: true, vm: true, max: false },
         updatedAt: Date.now()
       };
       sessions.set(id, session);
@@ -452,8 +311,8 @@ client.on(Events.InteractionCreate, async interaction => {
       const id = interaction.customId.split(":")[2];
       const session = getOwnedSession(interaction, id);
       if (!session) return interaction.reply({ content: "This session expired. Press the panel button again.", ephemeral: true });
-      if (!interaction.values.includes("prometheus")) return interaction.reply({ content: "That obfuscator is not available yet.", ephemeral: true });
-      session.provider = "prometheus";
+      if (!interaction.values.includes("starveil")) return interaction.reply({ content: "That obfuscator is not available yet.", ephemeral: true });
+      session.provider = "starveil";
       await interaction.update({
         embeds: [privateNoticeEmbed().setDescription("StarVeil 1.0 selected. Upload your script to continue.")],
         components: [new ActionRowBuilder().addComponents(
@@ -474,49 +333,17 @@ client.on(Events.InteractionCreate, async interaction => {
       const id = interaction.customId.split(":")[2];
       const session = getOwnedSession(interaction, id);
       if (!session) return interaction.reply({ content: "This session expired. Press the panel button again.", ephemeral: true });
-      if (session.provider !== "prometheus") return interaction.reply({ content: "Select the protection engine first.", ephemeral: true });
+      if (session.provider !== "starveil") return interaction.reply({ content: "Select the protection engine first.", ephemeral: true });
       await interaction.showModal(uploadModal(id));
       return;
     }
 
-    if (interaction.isButton() && interaction.customId.startsWith("pe:step:")) {
-      const [, , id, ...stepParts] = interaction.customId.split(":");
-      const step = stepParts.join(":");
+    if (interaction.isButton() && interaction.customId.startsWith("pe:option:")) {
+      const [, , id, optionKey] = interaction.customId.split(":");
       const session = getOwnedSession(interaction, id);
       if (!session) return interaction.reply({ content: "This session expired. Press the panel button again.", ephemeral: true });
-      session.steps = session.steps.includes(step)
-        ? session.steps.filter(value => value !== step)
-        : [...session.steps, step];
-      await interaction.update({ embeds: [settingsEmbed(session)], components: settingsComponents(session) });
-      return;
-    }
-
-    if (interaction.isButton() && interaction.customId.startsWith("pe:constant:")) {
-      const [, , id, option] = interaction.customId.split(":");
-      const session = getOwnedSession(interaction, id);
-      if (!session) return interaction.reply({ content: "This session expired. Press the panel button again.", ephemeral: true });
-      session.constantOptions = session.constantOptions.includes(option)
-        ? session.constantOptions.filter(value => value !== option)
-        : [...session.constantOptions, option];
-      await interaction.update({ embeds: [settingsEmbed(session)], components: settingsComponents(session) });
-      return;
-    }
-
-    if (interaction.isButton() && interaction.customId.startsWith("pe:name:")) {
-      const id = interaction.customId.split(":")[2];
-      const session = getOwnedSession(interaction, id);
-      if (!session) return interaction.reply({ content: "This session expired. Press the panel button again.", ephemeral: true });
-      const index = NAME_GENERATORS.findIndex(option => option.value === session.nameGenerator);
-      session.nameGenerator = NAME_GENERATORS[(index + 1) % NAME_GENERATORS.length].value;
-      await interaction.update({ embeds: [settingsEmbed(session)], components: settingsComponents(session) });
-      return;
-    }
-
-    if (interaction.isButton() && interaction.customId.startsWith("pe:lua:")) {
-      const id = interaction.customId.split(":")[2];
-      const session = getOwnedSession(interaction, id);
-      if (!session) return interaction.reply({ content: "This session expired. Press the panel button again.", ephemeral: true });
-      session.luaVersion = session.luaVersion === "Lua51" ? "LuaU" : "Lua51";
+      if (!OPTION_DEFINITIONS.some(option => option.key === optionKey)) return interaction.reply({ content: "That setting is unavailable.", ephemeral: true });
+      session.options[optionKey] = !session.options[optionKey];
       await interaction.update({ embeds: [settingsEmbed(session)], components: settingsComponents(session) });
       return;
     }
@@ -601,7 +428,7 @@ client.on(Events.MessageCreate, async message => {
       const targetMention = message.mentions.users.first();
       const targetId = args.find(value => /^\d{15,22}$/.test(value));
       const target = targetMention || (targetId ? await client.users.fetch(targetId).catch(() => null) : null);
-      const amountText = args.find(value => /^\\d+$/.test(value) && value !== targetId);
+      const amountText = args.find(value => /^\d+$/.test(value) && value !== targetId);
       const amount = Number(amountText);
       if (!target || !Number.isSafeInteger(amount) || amount < 1 || amount > 1000000) {
         await message.reply("Usage: `!addcredits @user amount` (amount must be 1–1,000,000).");
